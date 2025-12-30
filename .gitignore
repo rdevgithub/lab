@@ -1,0 +1,6 @@
+venv/
+clab-*/
+__pycache__/
+.topology.clab.yml.bak
+netbox_api.txt
+*.tar

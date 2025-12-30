@@ -1,0 +1,41 @@
+name: m1-lab
+
+mgmt:
+  network: m1-mgmt
+  ipv4-subnet: 172.20.20.0/24
+
+topology:
+  nodes:
+    spine1:
+      kind: ceos
+      image: ceos:latest
+      mgmt-ipv4: 172.20.20.4
+      ports:
+        - 8004:80
+    leaf1:
+      kind: ceos
+      image: ceos:latest
+      mgmt-ipv4: 172.20.20.5
+      ports:
+        - 8005:80
+    leaf2:
+      kind: ceos
+      image: ceos:latest
+      mgmt-ipv4: 172.20.20.6
+      ports:
+        - 8006:80
+
+    client1:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.20.20.7
+    client2:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.20.20.8
+
+  links:
+    - endpoints: ["spine1:eth1", "leaf1:eth1"]
+    - endpoints: ["spine1:eth2", "leaf2:eth1"]
+    - endpoints: ["leaf1:eth2", "client1:eth1"]
+    - endpoints: ["leaf2:eth2", "client2:eth1"]

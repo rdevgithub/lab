@@ -1,67 +1,86 @@
 import pynetbox
 import pyeapi
+import os
 
-# 1. NetBox Setup
-NETBOX_URL = 'http://localhost:8000'
-NETBOX_TOKEN = 'fc0ece5ed87416de5481370a57e4c18dae626cb9' 
-nb = pynetbox.api(NETBOX_URL, token=NETBOX_TOKEN)
-
-# 2. Arista Setup
-connection = pyeapi.connect(
-    host='172.20.20.4', 
-    username='admin', 
-    password='admin', 
-    transport='http', 
-    port=80
-)
-node = pyeapi.client.Node(connection)
-
-def run_report():
-    print(f"\n--- Running Compliance Report for leaf1 ---")
-
-    # --- STEP A: Get Intent from NetBox ---
+# --- 1. LOAD TOKEN FROM FILE ---
+def get_token():
     try:
-        nb_device = nb.dcim.devices.get(name='leaf1')
-        nb_iface = nb.dcim.interfaces.get(device_id=nb_device.id, name='Ethernet1')
-        nb_ip_obj = nb.ipam.ip_addresses.get(interface_id=nb_iface.id)
-        intended_ip = str(nb_ip_obj.address) if nb_ip_obj else "None"
-    except Exception as e:
-        print(f"NetBox Error: {e}")
-        return
+        with open("netbox_api.txt", "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        print("❌ Error: netbox_api.txt not found!")
+        return None
 
-    # --- STEP B: Get Reality from Switch (JSON Mode) ---
-    try:
-        # We use a command that returns clean JSON by default
-        # This avoids the 'Incomplete token' error found in text-based config commands
-        response = node.run_commands(['show ip interface Ethernet1'])
-        
-        # Navigate the Arista JSON structure safely
-        # response[0] is the result of 'show ip interface Ethernet1'
-        intf_data = response[0]['interfaces'].get('Ethernet1', {})
-        addr_info = intf_data.get('interfaceAddress', {}).get('primaryIp', {})
-        
-        ip = addr_info.get('address')
-        mask = addr_info.get('maskLen')
-        
-        if ip and mask:
-            actual_ip = f"{ip}/{mask}"
-        else:
-            actual_ip = "None"
-            
-    except Exception as e:
-        actual_ip = f"Switch Error: {e}"
+token = get_token()
 
-    # --- STEP C: Compare and Report ---
-    print(f"\nINTERFACE: Ethernet1")
-    print(f"  [INTENTION]: {intended_ip}")
-    print(f"  [ACTUAL]   : {actual_ip}")
+# --- 2. SETTINGS ---
+NETBOX_URL = "http://localhost:8000"
+nb = pynetbox.api(NETBOX_URL, token=token)
 
-    if intended_ip == actual_ip and intended_ip != "None":
-        print(f"  RESULT     : ✅ COMPLIANT")
-    else:
-        print(f"  RESULT     : ❌ NON-COMPLIANT (Drift Detected)")
+# Matches your specific Docker PS output
+device_map = {
+    "spine1": 8004,
+    "leaf1": 8005,
+    "leaf2": 8006
+}
+
+def check_compliance(device_name, port):
+    print(f"\n--- Checking Compliance for {device_name} ---")
     
-    print("-" * 45 + "\n")
+    try:
+        # --- 3. GET INTENTION (NETBOX) ---
+        nb_device = nb.dcim.devices.get(name=device_name)
+        if not nb_device:
+            print(f"⚠️ Device {device_name} not found in NetBox.")
+            return
 
-if __name__ == "__main__":
-    run_report()
+        nb_interfaces = nb.dcim.interfaces.filter(device_id=nb_device.id)
+        
+        intended_state = {}
+        for iface in nb_interfaces:
+            # Look for IP addresses assigned to this interface
+            ip_objs = nb.ipam.ip_addresses.filter(interface_id=iface.id)
+            for ip in ip_objs:
+                # Store just the IP part (e.g., '10.0.0.1')
+                intended_state[iface.name] = str(ip.address).split('/')[0]
+
+        # --- 4. GET REALITY (ARISTA) ---
+        connection = pyeapi.connect(
+            transport='http', 
+            host='127.0.0.1',
+            username='admin', 
+            password='admin',
+            port=port
+        )
+        node = pyeapi.client.Node(connection)
+        actual_output = node.enable("show ip interface brief")
+        actual_interfaces = actual_output[0]['result']['interfaces']
+
+        # --- 5. COMPARE ---
+        if not intended_state:
+            print(f"ℹ️ No IPs documented in NetBox for {device_name}.")
+        else:
+            for iface_name, intended_ip in intended_state.items():
+                iface_data = actual_interfaces.get(iface_name, {})
+                
+                # Dig into the 'interfaceAddress' dictionary returned by Arista
+                raw_ip_data = iface_data.get('interfaceAddress', {}).get('ipAddr', 'Not Configured')
+                
+                # Fix: Properly handle the dictionary vs string logic
+                if isinstance(raw_ip_data, dict):
+                    actual_ip = raw_ip_data.get('address', 'Not Configured')
+                else:
+                    actual_ip = raw_ip_data
+
+                if actual_ip == intended_ip:
+                    print(f"✅ {iface_name}: Match ({actual_ip})")
+                else:
+                    print(f"❌ {iface_name}: MISMATCH! NetBox: {intended_ip} | Switch: {actual_ip}")
+
+    except Exception as e:
+        print(f"💥 Error checking {device_name}: {e}")
+
+# --- 6. EXECUTE ---
+if token:
+    for device, port in device_map.items():
+        check_compliance(device, port)
